@@ -34,13 +34,13 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
         return y
-    
+
 
 class MLP(nn.Module):
     def __init__(self,config):
         super().__init__()
         self.c_fc=nn.Linear(config.n_embd,4*config.n_embd)
-        self.gelu=nn.GELU()
+        self.gelu=nn.GELU(approximate='tanh')
         self.c_proj=nn.Linear(4*config.n_embd,config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT=1
         
@@ -187,7 +187,7 @@ print(f"using device: {device}")
 
 
 num_return_sequences=1
-max_lenght=30
+max_lenght=100
 
 import tiktoken
 
@@ -218,43 +218,66 @@ torch.manual_seed(1337)
 if device=='cuda':
     torch.cuda.manual_seed(1337)
 train_loader = DataLoaderLite(B=4,T=32)
+torch.set_float32_matmul_precision('high') #tf32 for cuda  8x speedup
 
 #model=GPT.from_pretrained('gpt2')
 
 model=GPT(GPTConfig())
 model.eval()
 model.to(device)
+#model=torch.compile(model)
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 
-for i in range(50):
+import time 
+for i in range(2640):
+    t0=time.time()
     x,y=train_loader.next_batch()
     optimizer.zero_grad()
-    logits,loss=model(x,y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16 ):
+        logits,loss=model(x,y)
     loss.backward()
     optimizer.step()
-    print(f"step {i+1}, loss: {loss.item():.4f}")
+    torch.cuda.synchronize() if device=='cuda' else None
+    t1=time.time()
+    dt=(t1-t0)*1000
+
+    print(f"step {i+1}, loss: {loss.item():.4f}, dt: {dt:.2f}ms")
     
     print(loss.item())
-import sys; sys.exit(0)
+#  import sys; sys.exit(0)
 
 print("didnt crash yay!")
 
 
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
-while x.size(1)<max_lenght:
+x, y = train_loader.next_batch()
+prompt_len = x.size(1) 
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1) < max_lenght:
     with torch.no_grad():
-        logits=model(x)
-        logits=logits[:,-1,:]
-        probs=F.softmax(logits,dim=-1)
-        topk_probs,topk_indices=torch.topk(probs,50,dim=-1)
+        logits, _ = model(x)
+        logits = logits[:, -1, :]
+        probs = F.softmax(logits, dim=-1)
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
 
-        ix=torch.multinomial(topk_probs,1)
-        xcol=torch.gather(topk_indices,1,ix)
-        x=torch.cat((x,xcol),dim=1)
+        ix = torch.multinomial(topk_probs, 1)
+        xcol = torch.gather(topk_indices, 1, ix)
+        x = torch.cat((x, xcol), dim=1)
 
+enc = tiktoken.get_encoding("gpt2")
+
+# prompt_len = x.size(1) - (max_lenght - x.size(1))
 for i in range(num_return_sequences):
-    tokens=x[i,:max_lenght].tolist()
-    text=enc.decode(tokens)
+    tokens = x[i, :max_lenght].tolist()
+    prompt_tokens = tokens[:prompt_len]
+    predicted_tokens = tokens[prompt_len:]
+    prompt_text = enc.decode(prompt_tokens)
+    predicted_text = enc.decode(predicted_tokens)
     print(f"=== SAMPLE {i+1} ===")
-    print(text)
+    print("[PROMPT]:")
+    print(prompt_text)
+    print("[PREDICTED]:")
+    print(predicted_text)
