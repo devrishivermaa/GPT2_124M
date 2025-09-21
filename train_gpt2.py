@@ -196,8 +196,8 @@ class DataLoaderLite:
         self.B=B
         self.T=T
         self.enc=tiktoken.get_encoding("gpt2")
-        with open("input.txt",'r') as f:
-            text=f.read()
+        with open("output.txt", 'r', encoding='utf-8') as f:
+            text = f.read()
         tokens=self.enc.encode(text)
         self.tokens=torch.tensor(tokens)
         print(f'loaded {self.tokens} tokens')
